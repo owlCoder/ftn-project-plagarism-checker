@@ -41,4 +41,5 @@ Configuration Options
 | --file-threshold  | Minimum similarity for a single file to be displayed | 0.6     |
 
 ## Preview of report
-<iframe src="report.html" width="100%" height="600px"></iframe>
+![Report Preview](report.png)
+
