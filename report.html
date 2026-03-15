@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Plagiarism Report</title>
+<style>
+:root{--bg:#0f0f0f;--s1:#181818;--s2:#1e1e1e;--bdr:#272727;
+      --txt:#e5e5e5;--mut:#6b6b6b;--acc:#6366f1}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);
+     font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;
+     padding:2rem 2.5rem;max-width:1440px;margin:0 auto}
+h1{font-size:1.4rem;font-weight:700;margin-bottom:.2rem}
+.meta{color:var(--mut);font-size:.8rem;margin-bottom:1.8rem;line-height:1.7}
+h2{font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;
+   color:var(--mut);margin:2rem 0 .7rem}
+.mut{color:var(--mut)}
+/* stat strip */
+.stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));
+       gap:.6rem;margin-bottom:1.8rem}
+.stat{background:var(--s1);border:1px solid var(--bdr);border-radius:9px;padding:.9rem 1rem}
+.sl{font-size:.68rem;color:var(--mut);text-transform:uppercase;letter-spacing:.07em}
+.sv{font-size:1.8rem;font-weight:700;margin-top:.2rem}
+/* table card */
+.tcard{background:var(--s1);border:1px solid var(--bdr);border-radius:9px;
+       overflow:hidden;margin-bottom:1rem}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:.45rem .8rem;font-size:.68rem;color:var(--mut);
+   text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--bdr)}
+td{padding:.5rem .8rem;border-bottom:1px solid var(--bdr);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#ffffff05}
+.badge{display:inline-block;padding:.18rem .5rem;border-radius:5px;
+       font-size:.75rem;font-weight:700;color:#000}
+/* filter bar */
+.fbar{display:flex;gap:.6rem;align-items:center;margin-bottom:.9rem;flex-wrap:wrap}
+input[type=range]{accent-color:var(--acc);width:150px}
+.flab{font-size:.8rem;color:var(--mut);min-width:40px}
+/* pair card */
+.pcard{background:var(--s1);border:1px solid var(--bdr);border-radius:9px;
+       overflow:hidden;margin-bottom:.65rem}
+.ph{display:flex;justify-content:space-between;align-items:center;
+    padding:.75rem 1rem;cursor:pointer;user-select:none}
+.ph:hover{background:#ffffff04}
+.pt{font-weight:600;font-size:.93rem}
+.pb{display:none;border-top:1px solid var(--bdr);padding:.8rem 1rem 1rem}
+.pb.open{display:block}
+/* file match */
+.fm{border:1px solid var(--bdr);border-radius:7px;margin-bottom:.55rem;overflow:hidden}
+.fmh{display:flex;align-items:center;gap:.55rem;padding:.5rem .8rem;
+     cursor:pointer;background:var(--s2)}
+.fmh:hover{background:#ffffff06}
+.fp{flex:1;font-size:.78rem;font-family:monospace;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fmd{display:none;padding:.7rem .8rem}
+.fmd.open{display:block}
+/* snippets */
+.snip{margin-bottom:.8rem;border:1px solid var(--bdr);border-radius:7px;overflow:hidden}
+.sh{padding:.38rem .7rem;background:var(--s2);font-size:.75rem;
+    border-bottom:1px solid var(--bdr);display:flex;gap:.7rem;align-items:center}
+.cols{display:grid;grid-template-columns:1fr 1fr}
+.cw{overflow:hidden}
+.cw+.cw{border-left:1px solid var(--bdr)}
+.clabel{font-size:.68rem;color:var(--mut);padding:.28rem .55rem;
+        background:#ffffff03;border-bottom:1px solid var(--bdr);
+        font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+pre{background:#111;font-family:'Cascadia Code','Fira Code','Consolas',monospace;
+    font-size:.73rem;padding:.5rem .6rem;overflow-x:auto;white-space:pre;line-height:1.55}
+.ln{color:#333;user-select:none;display:inline-block;
+    width:2.6rem;text-align:right;margin-right:.5rem}
+.chev{font-size:.72rem;transition:transform .18s;color:var(--mut)}
+code{font-family:monospace;font-size:.78rem;background:#ffffff0a;
+     padding:.1rem .35rem;border-radius:4px}
+.nop{color:var(--mut);padding:.4rem 0;font-size:.85rem}
+</style>
+</head>
+<body>
+<h1>Plagiarism Report</h1>
+<p class="meta">
+  Generated: 2026-03-15 11:52
+  &nbsp;·&nbsp; Template: <code>project-template.zip</code>
+  &nbsp;·&nbsp; Mode: <code>AST / structural (tree-sitter)</code>
+  &nbsp;·&nbsp; Students: <strong>3</strong>
+  &nbsp;·&nbsp; Pairs analysed: <strong>3</strong>
+</p>
+
+<div class="stats">
+  <div class="stat">
+    <div class="sl">Suspicious pairs (&gt;30%)</div>
+    <div class="sv" style="color:#f87171">3</div>
+  </div>
+  <div class="stat">
+    <div class="sl">Avg template code</div>
+    <div class="sv" style="color:var(--acc)">59.1%</div>
+  </div>
+  <div class="stat">
+    <div class="sl">Highest similarity</div>
+    <div class="sv" style="color:#f87171">100.0%</div>
+  </div>
+  <div class="stat">
+    <div class="sl">Students analysed</div>
+    <div class="sv">3</div>
+  </div>
+</div>
+
+<h2>Student overview</h2>
+<div class="tcard">
+<table>
+  <thead><tr>
+    <th>Student</th><th>Total lines</th><th>Student lines</th><th>Template %</th>
+  </tr></thead>
+  <tbody><tr><td><strong>studentA</strong></td><td>95</td><td>32</td><td><span class="badge" style="background:#fb923c">66.3%</span></td></tr><tr><td><strong>studentB</strong></td><td>95</td><td>32</td><td><span class="badge" style="background:#fb923c">66.3%</span></td></tr><tr><td><strong>studentC</strong></td><td>74</td><td>41</td><td><span class="badge" style="background:#facc15">44.6%</span></td></tr></tbody>
+</table>
+</div>
+
+<h2>Pairwise similarity</h2>
+<div class="fbar">
+  <span class="mut" style="font-size:.8rem">Show pairs ≥</span>
+  <input type="range" min="0" max="100" value="0" oninput="filterPairs(this.value)"/>
+  <span class="flab" id="fl">0%</span>
+</div>
+<div id="pairs"><div class="pcard" data-sim="100.0"><div class="ph" onclick="tog('pb-0')">  <div>    <div class="pt">      studentA      <span class="mut"> ↔ </span>      studentB    </div>    <div class="mut" style="font-size:.75rem;margin-top:.2rem">      Student lines: 32 / 32      &nbsp;·&nbsp; Matched files: 2      &nbsp;·&nbsp; Snippets: 1    </div>  </div>  <div style="display:flex;align-items:center;gap:.55rem">    <span class="badge" style="background:#f87171">100.0%</span>    <span class="chev" id="c-pb-0">▼</span>  </div></div><div class="pb" id="pb-0"><div class="fm"><div class="fmh" onclick="tog('fm-0-0')">  <span class="fp">server/src/Services/booking/BookingService.ts</span>  <span class="badge" style="background:#f87171">100%</span>  <span class="chev" id="c-fm-0-0">▼</span></div><div class="fmd" id="fm-0-0"><div class="snip"><div class="sh">  <span style="color:#f87171;font-weight:700">75% match</span>  <span class="mut">lines 1–17  ↔ 1–17</span></div><div class="cols">  <div class="cw"><div class="clabel">server/src/Services/booking/BookingService.ts</div><pre><span class="ln">1</span>
+<span class="ln">2</span>import { IBookingService } from &#x27;../../Domain/services/booking/IBookingService&#x27;;
+<span class="ln">3</span>export class BookingService implements IBookingService {
+<span class="ln">4</span>    async createBooking(userId: number, date: string, seats: number): Promise&lt;any&gt; {
+<span class="ln">5</span>        if (seats &lt; 1 || seats &gt; 10) throw new Error(&#x27;Invalid seat count&#x27;);
+<span class="ln">6</span>        const booking = { userId, date, seats, status: &#x27;pending&#x27;, id: Math.random() };
+<span class="ln">7</span>        return booking;
+<span class="ln">8</span>    }
+<span class="ln">9</span>    async cancelBooking(id: number): Promise&lt;boolean&gt; {
+<span class="ln">10</span>        const booking = await this.repo.findById(id);
+<span class="ln">11</span>        if (!booking) return false;
+<span class="ln">12</span>        return this.repo.update(id, { status: &#x27;cancelled&#x27; });
+<span class="ln">13</span>    }
+<span class="ln">14</span>    async getUserBookings(userId: number): Promise&lt;any[]&gt; {
+<span class="ln">15</span>        return this.repo.findByUserId(userId);
+<span class="ln">16</span>    }
+<span class="ln">17</span>}</pre></div>  <div class="cw"><div class="clabel">server/src/Services/booking/BookingService.ts</div><pre><span class="ln">1</span>
+<span class="ln">2</span>import { IBookingService } from &#x27;../../Domain/services/booking/IBookingService&#x27;;
+<span class="ln">3</span>export class BookingService implements IBookingService {
+<span class="ln">4</span>    async createBooking(userId: number, date: string, seats: number): Promise&lt;any&gt; {
+<span class="ln">5</span>        if (seats &lt; 1 || seats &gt; 10) throw new Error(&#x27;Invalid seat count&#x27;);
+<span class="ln">6</span>        const booking = { userId, date, seats, status: &#x27;pending&#x27;, id: Math.random() };
+<span class="ln">7</span>        return booking;
+<span class="ln">8</span>    }
+<span class="ln">9</span>    async cancelBooking(id: number): Promise&lt;boolean&gt; {
+<span class="ln">10</span>        const b = await this.repo.findById(id);
+<span class="ln">11</span>        if (!b) return false;
+<span class="ln">12</span>        return this.repo.update(id, { status: &#x27;cancelled&#x27; });
+<span class="ln">13</span>    }
+<span class="ln">14</span>    async getUserBookings(userId: number): Promise&lt;any[]&gt; {
+<span class="ln">15</span>        return this.repo.findByUserId(userId);
+<span class="ln">16</span>    }
+<span class="ln">17</span>}</pre></div></div></div></div></div><div class="fm"><div class="fmh" onclick="tog('fm-0-1')">  <span class="fp">client/src/pages/user/BookingsPage.tsx</span>  <span class="badge" style="background:#f87171">100%</span>  <span class="chev" id="c-fm-0-1">▼</span></div><div class="fmd" id="fm-0-1"><p class="nop">No concrete snippet extracted (files may be very short).</p></div></div></div></div>
+<div class="pcard" data-sim="47.0"><div class="ph" onclick="tog('pb-1')">  <div>    <div class="pt">      studentA      <span class="mut"> ↔ </span>      studentC    </div>    <div class="mut" style="font-size:.75rem;margin-top:.2rem">      Student lines: 32 / 41      &nbsp;·&nbsp; Matched files: 0      &nbsp;·&nbsp; Snippets: 0    </div>  </div>  <div style="display:flex;align-items:center;gap:.55rem">    <span class="badge" style="background:#facc15">47.0%</span>    <span class="chev" id="c-pb-1">▼</span>  </div></div><div class="pb" id="pb-1"><p class="nop">No individual file matches above threshold.</p></div></div>
+<div class="pcard" data-sim="47.0"><div class="ph" onclick="tog('pb-2')">  <div>    <div class="pt">      studentB      <span class="mut"> ↔ </span>      studentC    </div>    <div class="mut" style="font-size:.75rem;margin-top:.2rem">      Student lines: 32 / 41      &nbsp;·&nbsp; Matched files: 0      &nbsp;·&nbsp; Snippets: 0    </div>  </div>  <div style="display:flex;align-items:center;gap:.55rem">    <span class="badge" style="background:#facc15">47.0%</span>    <span class="chev" id="c-pb-2">▼</span>  </div></div><div class="pb" id="pb-2"><p class="nop">No individual file matches above threshold.</p></div></div></div>
+
+<script>
+function tog(id){
+  var el=document.getElementById(id),ch=document.getElementById('c-'+id);
+  el.classList.toggle('open');
+  if(ch)ch.style.transform=el.classList.contains('open')?'rotate(180deg)':'';
+}
+function filterPairs(v){
+  document.getElementById('fl').textContent=v+'%';
+  document.querySelectorAll('.pcard').forEach(function(c){
+    c.style.display=parseFloat(c.dataset.sim)>=parseFloat(v)?'':'none';
+  });
+}
+</script>
+</body>
+</html>
