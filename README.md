@@ -8,13 +8,15 @@ Installation
 
 Install the required packages:
 
+```bash
 pip install tree-sitter tree-sitter-typescript tree-sitter-javascript tree-sitter-python
+```
 
 Usage
 -----
-
+```bash
 python plagiarism_checker.py ./submissions ./project-template.zip
-
+```
 Key Features / Improvements
 ---------------------------
 
