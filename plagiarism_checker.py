@@ -14,9 +14,10 @@ Options:
     --output      Output HTML file path (default: plagiarism_report.html)
     --extensions  Comma-separated file extensions to analyse
                   (default: ts,tsx,js,jsx,py,java,cs,cpp,c,h)
+    --threads     Number of threads for parallel processing (default: 4)
 
 Example:
-    python plagiarism_checker.py ./submissions ./project-template.zip --threshold 50
+    python plagiarism_checker.py ./submissions ./project-template.zip --threshold 50 --threads 8
 """
 
 import argparse
@@ -33,6 +34,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import difflib
 
 
 # ── Tokeniser ─────────────────────────────────────────────────────────────────
@@ -83,6 +86,63 @@ def file_similarity(src_a: str, src_b: str, ext: str) -> float:
     ta = shingles(tokenise(normalise(src_a, ext)))
     tb = shingles(tokenise(normalise(src_b, ext)))
     return jaccard(ta, tb)
+
+
+# ── Diff generation ───────────────────────────────────────────────────────────
+
+def generate_side_by_side_diff(text_a: str, text_b: str, context_lines: int = 3) -> str:
+    """Generate GitHub-style side-by-side diff HTML."""
+    lines_a = text_a.splitlines()
+    lines_b = text_b.splitlines()
+    
+    differ = difflib.unified_diff(
+        lines_a, lines_b,
+        lineterm='',
+        n=context_lines
+    )
+    
+    diff_lines = list(differ)
+    
+    if not diff_lines:
+        return '<div class="diff-empty">Files are identical</div>'
+    
+    html_parts = []
+    html_parts.append('<div class="diff-container">')
+    html_parts.append('<table class="diff-table">')
+    html_parts.append('<colgroup><col class="line-num"><col class="line-content"><col class="line-num"><col class="line-content"></colgroup>')
+    html_parts.append('<thead><tr><th colspan="2">File A</th><th colspan="2">File B</th></tr></thead>')
+    html_parts.append('<tbody>')
+    
+    i_a = 0
+    i_b = 0
+    
+    for line in diff_lines[2:]:  # Skip the --- and +++ lines
+        if line.startswith('@@'):
+            # Parse hunk header
+            match = re.match(r'@@ -(\d+),?\d* \+(\d+),?\d* @@', line)
+            if match:
+                i_a = int(match.group(1)) - 1
+                i_b = int(match.group(2)) - 1
+            html_parts.append(f'<tr class="diff-hunk"><td colspan="4">{html.escape(line)}</td></tr>')
+        elif line.startswith('-'):
+            # Removed line
+            content = html.escape(line[1:]) or '&nbsp;'
+            html_parts.append(f'<tr class="diff-remove"><td class="line-num">{i_a + 1}</td><td class="line-content">-{content}</td><td class="line-num"></td><td class="line-content"></td></tr>')
+            i_a += 1
+        elif line.startswith('+'):
+            # Added line
+            content = html.escape(line[1:]) or '&nbsp;'
+            html_parts.append(f'<tr class="diff-add"><td class="line-num"></td><td class="line-content"></td><td class="line-num">{i_b + 1}</td><td class="line-content">+{content}</td></tr>')
+            i_b += 1
+        elif line.startswith(' '):
+            # Context line
+            content = html.escape(line[1:]) or '&nbsp;'
+            html_parts.append(f'<tr class="diff-context"><td class="line-num">{i_a + 1}</td><td class="line-content">{content}</td><td class="line-num">{i_b + 1}</td><td class="line-content">{content}</td></tr>')
+            i_a += 1
+            i_b += 1
+    
+    html_parts.append('</tbody></table></div>')
+    return ''.join(html_parts)
 
 
 # ── ZIP extraction ─────────────────────────────────────────────────────────────
@@ -183,6 +243,7 @@ class FilePairMatch:
     path_a: str
     path_b: str
     similarity: float          # 0–1
+    diff_html: str = ''        # GitHub-style diff
 
 
 @dataclass
@@ -233,7 +294,8 @@ def compare_pair(
             ext = path.rsplit('.', 1)[-1].lower() if '.' in path else ''
             sim = file_similarity(files_a[path], files_b[path], ext)
             if sim >= file_threshold:
-                flagged.append(FilePairMatch(path, path, sim))
+                diff_html = generate_side_by_side_diff(files_a[path], files_b[path])
+                flagged.append(FilePairMatch(path, path, sim, diff_html))
 
     # Also check cross-path similarity for the highest-value files
     # (catches renamed files)
@@ -251,7 +313,8 @@ def compare_pair(
                     continue
                 sim = file_similarity(ta, tb, ext_a)
                 if sim >= 0.85:          # high threshold for cross-path
-                    flagged.append(FilePairMatch(pa, pb, sim))
+                    diff_html = generate_side_by_side_diff(ta, tb)
+                    flagged.append(FilePairMatch(pa, pb, sim, diff_html))
                     checked.add((pa, pb))
 
     flagged.sort(key=lambda m: m.similarity, reverse=True)
@@ -264,6 +327,12 @@ def compare_pair(
         total_student_lines_a=proj_a.student_lines,
         total_student_lines_b=proj_b.student_lines,
     )
+
+
+def compare_pair_wrapper(args):
+    """Wrapper for parallel processing."""
+    pa, pb, file_threshold = args
+    return compare_pair(pa, pb, file_threshold)
 
 
 # ── HTML report ───────────────────────────────────────────────────────────────
@@ -336,6 +405,32 @@ _HTML_TEMPLATE = """\
           background: #ffffff0a; padding: .1rem .35rem; border-radius: 4px; }}
   .chevron {{ transition: transform .2s; font-size: .8rem; }}
   .open .chevron {{ transform: rotate(180deg); }}
+  
+  /* Diff styles */
+  .diff-container {{ margin-top: 1rem; overflow-x: auto; }}
+  .diff-table {{ width: 100%; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: .75rem;
+                 border: 1px solid var(--border); }}
+  .diff-table thead th {{ background: #1a1a1a; padding: .4rem .6rem; text-align: center; }}
+  .diff-table .line-num {{ width: 40px; text-align: right; padding: .2rem .5rem; 
+                          color: var(--muted); user-select: none; background: #0a0a0a; }}
+  .diff-table .line-content {{ padding: .2rem .6rem; white-space: pre; font-family: inherit; }}
+  .diff-context {{ background: var(--surface); }}
+  .diff-remove {{ background: #3d1a1a; }}
+  .diff-remove .line-content {{ color: #ff6b6b; }}
+  .diff-add {{ background: #1a3d1a; }}
+  .diff-add .line-content {{ color: #69db7c; }}
+  .diff-hunk {{ background: #1a2332; color: #6ea8fe; }}
+  .diff-hunk td {{ padding: .3rem .6rem; font-weight: 600; }}
+  .diff-empty {{ color: var(--muted); padding: 1rem; text-align: center; }}
+  .file-diff-header {{ display: flex; align-items: center; justify-content: space-between;
+                       padding: .6rem .8rem; background: #0a0a0a; border-bottom: 1px solid var(--border);
+                       cursor: pointer; }}
+  .file-diff-header:hover {{ background: #121212; }}
+  .file-diff-title {{ font-weight: 600; font-size: .85rem; }}
+  .file-diff-body {{ display: none; }}
+  .file-diff-body.open {{ display: block; }}
+  .expand-icon {{ transition: transform .2s; }}
+  .file-diff-body.open + .file-diff-header .expand-icon {{ transform: rotate(180deg); }}
 </style>
 </head>
 <body>
@@ -388,6 +483,10 @@ function toggleDetail(id) {{
   const hdr = el.previousElementSibling;
   hdr.classList.toggle('open');
 }}
+function toggleDiff(id) {{
+  const el = document.getElementById(id);
+  el.classList.toggle('open');
+}}
 function filterPairs(val) {{
   document.getElementById('thresh-label').textContent = val + '%';
   document.querySelectorAll('.pair-card').forEach(card => {{
@@ -423,10 +522,12 @@ def render_pair_cards(pairs: List[PairResult]) -> str:
         sim_pct = pr.overall_similarity * 100
         c = sim_colour(pr.overall_similarity)
         detail_rows = ''
-        for fm in pr.flagged_files:
+        for j, fm in enumerate(pr.flagged_files):
             fc = sim_colour(fm.similarity)
             bar_w = int(fm.similarity * 100)
             same = '✓' if fm.path_a == fm.path_b else '↔'
+            
+            diff_id = f'd{i}_f{j}'
             detail_rows += (
                 f'<tr>'
                 f'<td>{same}</td>'
@@ -436,14 +537,18 @@ def render_pair_cards(pairs: List[PairResult]) -> str:
                 f'<span class="bar-wrap"><span class="bar" style="width:{bar_w}%;background:{fc}"></span></span>'
                 f' <span style="color:{fc};font-weight:700">{fm.similarity*100:.0f}%</span>'
                 f'</td>'
+                f'<td><button onclick="toggleDiff(\'{diff_id}\')" style="background:var(--accent);color:#fff;border:none;padding:.3rem .6rem;border-radius:4px;cursor:pointer;font-size:.7rem">View Diff</button></td>'
                 f'</tr>'
+                f'<tr><td colspan="5" style="padding:0">'
+                f'<div class="file-diff-body" id="{diff_id}">{fm.diff_html}</div>'
+                f'</td></tr>'
             )
         detail_html = ''
         if detail_rows:
             detail_html = (
                 f'<table><thead><tr>'
                 f'<th style="width:24px"></th>'
-                f'<th>File A</th><th>File B</th><th>Similarity</th>'
+                f'<th>File A</th><th>File B</th><th>Similarity</th><th style="width:100px">Actions</th>'
                 f'</tr></thead><tbody>{detail_rows}</tbody></table>'
             )
         else:
@@ -517,6 +622,8 @@ def main():
                         help='Comma-separated file extensions to analyse')
     parser.add_argument('--file-threshold', type=float, default=0.6, dest='file_threshold',
                         help='Per-file similarity threshold for flagging (0–1, default: 0.6)')
+    parser.add_argument('--threads', type=int, default=4,
+                        help='Number of threads for parallel processing (default: 4)')
     args = parser.parse_args()
 
     allowed_ext = {e.strip().lower() for e in args.extensions.split(',')}
@@ -552,17 +659,34 @@ def main():
     if len(projects) < 2:
         sys.exit("Need at least 2 student ZIPs to compare.")
 
-    # ── Pairwise comparison ────────────────────────────────────
+    # ── Pairwise comparison with multithreading ────────────────
     pairs_total = len(projects) * (len(projects) - 1) // 2
-    print(f"\n🔍  Comparing {pairs_total} pairs…")
+    print(f"\n🔍  Comparing {pairs_total} pairs using {args.threads} threads…")
 
     pairs: List[PairResult] = []
-    for i, (pa, pb) in enumerate(itertools.combinations(projects, 2)):
-        result = compare_pair(pa, pb, file_threshold=args.file_threshold)
-        pairs.append(result)
-        sim_pct = result.overall_similarity * 100
-        flag = '🚨' if sim_pct >= args.threshold else '  '
-        print(f"    {flag} {pa.name} ↔ {pb.name}: {sim_pct:.1f}%")
+    
+    # Prepare all comparison tasks
+    comparison_tasks = [
+        (pa, pb, args.file_threshold) 
+        for pa, pb in itertools.combinations(projects, 2)
+    ]
+    
+    # Process comparisons in parallel
+    with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        future_to_pair = {
+            executor.submit(compare_pair_wrapper, task): task 
+            for task in comparison_tasks
+        }
+        
+        completed = 0
+        for future in as_completed(future_to_pair):
+            result = future.result()
+            pairs.append(result)
+            completed += 1
+            
+            sim_pct = result.overall_similarity * 100
+            flag = '🚨' if sim_pct >= args.threshold else '  '
+            print(f"    {flag} [{completed:4d}/{pairs_total}] {result.student_a} ↔ {result.student_b}: {sim_pct:.1f}%")
 
     # Sort pairs by similarity descending
     pairs.sort(key=lambda p: p.overall_similarity, reverse=True)
