@@ -9,22 +9,22 @@ Installation
 Install the required packages:
 
 ```bash
-pip install tree-sitter tree-sitter-typescript tree-sitter-javascript tree-sitter-python
+pip3 install tree-sitter tree-sitter-typescript tree-sitter-javascript tree-sitter-python
 ```
 
 Usage
 -----
 ```bash
-python plagiarism_checker.py ./submissions ./project-template.zip
+python3 plagiarism_checker.py ./submissions ./project-template.zip
 ```
 
 Full command with options:
 ```bash
-python plagiarism_checker.py ./submissions ./template.zip \
-  --threshold 50 \
-  --file-threshold 0.6 \
+python3 plagiarism_checker.py ./submissions ./project-template.zip \
+  --threshold 20 \
+  --file-threshold 0.2 \
   --output report.html \
-  --extensions ts,tsx,js,jsx,py,java,cpp,c,h,cs
+  --extensions ts,tsx,jsx,py,java,cpp,c,h,cs
 ```
 
 Key Features
