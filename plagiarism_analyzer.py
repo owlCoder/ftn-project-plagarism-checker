@@ -1,62 +1,79 @@
 #!/usr/bin/env python3
 """
-Plagiarism Checker – Reliable Jaccard‑Based Detection with Progress Callback
-----------------------------------------------------------------------------
-- Uses simple tokenization and shingling (proven algorithm)
-- Overall similarity = average of top 5 file similarities (same‑path + cross‑path)
-- Supports progress callback for real‑time UI updates
-- Diff font: Consolas, 9pt
+Plagiarism Checker – Optimized Jaccard‑Based Detection
+-----------------------------------------------------------------------------
+- Uses inverted index for cross‑path file comparisons (O(shared shingles))
+- Multiprocessing for pair analysis
+- Configurable thresholds, shingle size, and exclusions
+- HTML report with collapsible diffs (Consolas, 9pt)
 """
 
 import hashlib
 import html
 import re
 import zipfile
-from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from difflib import HtmlDiff
-from functools import lru_cache
-from pathlib import Path
-from typing import Dict, List, Set, Tuple, Optional, Callable
 import argparse
 import multiprocessing as mp
-import itertools
+from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, field
+from difflib import HtmlDiff
+from functools import lru_cache, partial
+from pathlib import Path
+from typing import Dict, List, Set, Tuple, Optional, Callable, Any
+
+# Optional progress bar
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
 
 # ----------------------------------------------------------------------
-# Configuration
+# Configuration defaults
 # ----------------------------------------------------------------------
 DEFAULT_ALLOWED_EXTS = {'py', 'java', 'js', 'ts', 'cpp', 'c', 'cs', 'sql'}
-DEFAULT_SHINGLE_SIZE = 5          # token n‑gram size
-DEFAULT_FILE_THRESHOLD = 0.6      # per‑file similarity threshold (same‑path)
-DEFAULT_OVERALL_THRESHOLD = 0.4   # overall similarity threshold
-DEFAULT_CROSS_THRESHOLD = 0.7     # cross‑path files are considered if sim >= this
+DEFAULT_SHINGLE_SIZE = 5
+DEFAULT_FILE_THRESHOLD = 0.6
+DEFAULT_OVERALL_THRESHOLD = 0.4
+DEFAULT_CROSS_THRESHOLD = 0.7
 DEFAULT_TERMS = ['any', 'exception', 'todo']
 MIN_FILE_LINES = 10
-
+MAX_FLAGGED_FILES = 20
 EXCLUDED_DIRS = {
     'dist-electron', 'dist', 'public', '__pycache__', '.git', 'node_modules',
     'build', 'target', 'out', 'bin', 'obj', 'venv', 'env', '.idea', '.vscode'
 }
 
 # ----------------------------------------------------------------------
-# Normalization (simple: strip comments, strings, whitespace)
+# Normalization (improved regex)
 # ----------------------------------------------------------------------
-_STRIP_LINE_COMMENT  = re.compile(r'//.*')
+# Python triple quotes (both """ and ''')
+_STRIP_PY_STRINGS = re.compile(
+    r'("""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|".*?"|\'.*?\')', re.DOTALL
+)
+# Multi‑line C‑style comments
 _STRIP_BLOCK_COMMENT = re.compile(r'/\*.*?\*/', re.DOTALL)
-_STRIP_HASH_COMMENT  = re.compile(r'#.*')
-_STRIP_STRINGS       = re.compile(r'("""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|".*?"|\'.*?\')', re.DOTALL)
-_WHITESPACE          = re.compile(r'\s+')
+_STRIP_LINE_COMMENT = re.compile(r'//.*')
+_STRIP_HASH_COMMENT = re.compile(r'#.*')
+_WHITESPACE = re.compile(r'\s+')
 
-@lru_cache(maxsize=10000)
+# For languages that use /* ... */ and //, we'll strip in order
 def normalize_content(content: str, ext: str) -> str:
     """Strip comments, string contents, and extra whitespace."""
+    # 1. Strip strings first (to avoid interfering with comment detection)
     if ext in ('py',):
+        content = _STRIP_PY_STRINGS.sub('""', content)
         content = _STRIP_HASH_COMMENT.sub('', content)
     else:
+        # C‑style languages: block comments, then line comments
         content = _STRIP_BLOCK_COMMENT.sub('', content)
         content = _STRIP_LINE_COMMENT.sub('', content)
-    content = _STRIP_STRINGS.sub('""', content)
+        # Also strip strings (basic)
+        content = re.sub(r'"[^"\\]*(\\.[^"\\]*)*"', '""', content)
+        content = re.sub(r"'[^'\\]*(\\.[^'\\]*)*'", "''", content)
+
+    # 2. Collapse whitespace
     content = _WHITESPACE.sub(' ', content).strip()
     return content.lower()
 
@@ -64,9 +81,9 @@ def tokenize_normalized(content: str, ext: str) -> List[str]:
     norm = normalize_content(content, ext)
     return re.findall(r'[a-z0-9_]+', norm)
 
-def shingles(tokens: List[str], k: int = DEFAULT_SHINGLE_SIZE) -> Set[str]:
+def shingles(tokens: List[str], k: int) -> Set[str]:
     if len(tokens) < k:
-        return {' '.join(tokens)}
+        return {' '.join(tokens)} if tokens else set()
     return {' '.join(tokens[i:i+k]) for i in range(len(tokens)-k+1)}
 
 def jaccard(a: Set[str], b: Set[str]) -> float:
@@ -76,9 +93,9 @@ def jaccard(a: Set[str], b: Set[str]) -> float:
         return 0.0
     return len(a & b) / len(a | b)
 
-def file_similarity(src_a: str, src_b: str, ext: str) -> float:
-    ta = shingles(tokenize_normalized(src_a, ext))
-    tb = shingles(tokenize_normalized(src_b, ext))
+def file_similarity(src_a: str, src_b: str, ext: str, k: int) -> float:
+    ta = shingles(tokenize_normalized(src_a, ext), k)
+    tb = shingles(tokenize_normalized(src_b, ext), k)
     return jaccard(ta, tb)
 
 # ----------------------------------------------------------------------
@@ -110,13 +127,28 @@ def should_skip_path(path: str, exclude_dirs: Set[str]) -> bool:
     return False
 
 def strip_common_prefix(files: Dict[str, str]) -> Dict[str, str]:
+    """Remove a common leading directory only if all files share the same first component."""
     paths = list(files.keys())
     if not paths:
         return files
     parts = [p.split('/') for p in paths]
-    if all(p[0] == parts[0][0] for p in parts):
+    first_parts = [p[0] for p in parts]
+    if all(p == first_parts[0] for p in first_parts):
+        # All files have the same first directory – strip it
         return { '/'.join(p[1:]): files[path] for path, p in zip(paths, parts) }
     return files
+
+def detect_encoding(data: bytes) -> str:
+    """Try to detect encoding; fallback to utf-8 with replacement."""
+    try:
+        import chardet
+        result = chardet.detect(data)
+        encoding = result['encoding'] if result['encoding'] else 'utf-8'
+        # Some encodings may be mis‑detected; we'll try with error replacement
+        data.decode(encoding, errors='replace')
+        return encoding
+    except ImportError:
+        return 'utf-8'
 
 def process_template(zip_path: Optional[Path], allowed_exts: Set[str],
                      exclude_dirs: Set[str]) -> Set[str]:
@@ -131,12 +163,14 @@ def process_template(zip_path: Optional[Path], allowed_exts: Set[str],
             if ext not in allowed_exts:
                 continue
             with zf.open(info) as f:
-                content = f.read().decode('utf-8', errors='ignore')
+                data = f.read()
+                encoding = detect_encoding(data)
+                content = data.decode(encoding, errors='replace')
                 hashes.add(normalized_hash(content, ext))
     return hashes
 
 def process_student(zip_path: Path, allowed_exts: Set[str], template_hashes: Set[str],
-                    exclude_dirs: Set[str]) -> Student:
+                    exclude_dirs: Set[str], min_lines: int) -> Student:
     name = zip_path.stem
     all_files = {}
     with zipfile.ZipFile(zip_path, 'r') as zf:
@@ -147,7 +181,9 @@ def process_student(zip_path: Path, allowed_exts: Set[str], template_hashes: Set
             if ext not in allowed_exts:
                 continue
             with zf.open(info) as f:
-                content = f.read().decode('utf-8', errors='ignore')
+                data = f.read()
+                encoding = detect_encoding(data)
+                content = data.decode(encoding, errors='replace')
                 all_files[info.filename] = content
 
     all_files = strip_common_prefix(all_files)
@@ -156,7 +192,7 @@ def process_student(zip_path: Path, allowed_exts: Set[str], template_hashes: Set
     for path, content in all_files.items():
         ext = path.split('.')[-1].lower()
         if normalized_hash(content, ext) not in template_hashes:
-            if content.count('\n') >= MIN_FILE_LINES:
+            if content.count('\n') >= min_lines:
                 student_files[path] = content
 
     total_lines = sum(c.count('\n') for c in all_files.values())
@@ -180,14 +216,33 @@ def check_terms(student: Student, term_list: List[str]) -> Dict[str, int]:
     for content in student.student_files.values():
         lower = content.lower()
         for term in term_list:
+            # Use word boundaries to avoid partial matches
             pattern = re.compile(rf'\b{re.escape(term)}\b', re.IGNORECASE)
             counts[term] += len(pattern.findall(lower))
     return counts
 
 # ----------------------------------------------------------------------
-# Pair Comparison
+# Optimized Pair Comparison with Inverted Index
 # ----------------------------------------------------------------------
-def compare_pair(stud_a: Student, stud_b: Student, file_thresh: float, cross_thresh: float) -> dict:
+def build_file_shingle_index(student_files: Dict[str, str], ext_map: Dict[str, str],
+                             k: int) -> Dict[str, List[Tuple[str, Set[str]]]]:
+    """Build a mapping from shingle to list of (file_path, shingle_set)."""
+    index = defaultdict(list)
+    for path, content in student_files.items():
+        ext = ext_map.get(path, path.split('.')[-1].lower())
+        tokens = tokenize_normalized(content, ext)
+        shingle_set = shingles(tokens, k)
+        for shingle in shingle_set:
+            index[shingle].append((path, shingle_set))
+    return index
+
+def compare_pair(students: Tuple[Student, Student], params: Dict[str, Any]) -> dict:
+    """Compare two students using an inverted index to reduce cross‑path work."""
+    stud_a, stud_b = students
+    file_thresh = params['file_thresh']
+    cross_thresh = params['cross_thresh']
+    k = params['shingle_size']
+
     flagged = []
     all_file_sims = []
 
@@ -195,7 +250,7 @@ def compare_pair(stud_a: Student, stud_b: Student, file_thresh: float, cross_thr
     common = set(stud_a.student_files.keys()) & set(stud_b.student_files.keys())
     for path in common:
         ext = path.split('.')[-1].lower()
-        sim = file_similarity(stud_a.student_files[path], stud_b.student_files[path], ext)
+        sim = file_similarity(stud_a.student_files[path], stud_b.student_files[path], ext, k)
         all_file_sims.append(sim)
         if sim >= file_thresh:
             flagged.append({
@@ -205,29 +260,48 @@ def compare_pair(stud_a: Student, stud_b: Student, file_thresh: float, cross_thr
                 'contentB': stud_b.student_files[path],
             })
 
-    # Cross‑path files
-    cross = set()
-    for pa, ca in stud_a.student_files.items():
-        for pb, cb in stud_b.student_files.items():
-            if pa == pb:
-                continue
-            key = f"{pa}|{pb}"
-            if key in cross:
-                continue
-            cross.add(key)
-            ext_a = pa.split('.')[-1].lower()
-            ext_b = pb.split('.')[-1].lower()
-            if ext_a != ext_b:
-                continue
-            sim = file_similarity(ca, cb, ext_a)
-            all_file_sims.append(sim)
-            if sim >= cross_thresh:
-                flagged.append({
-                    'pathA': pa, 'pathB': pb,
-                    'similarity': sim,
-                    'contentA': ca,
-                    'contentB': cb,
-                })
+    # Cross‑path files using inverted index
+    # Build extension maps
+    ext_map_a = {p: p.split('.')[-1].lower() for p in stud_a.student_files}
+    ext_map_b = {p: p.split('.')[-1].lower() for p in stud_b.student_files}
+
+    # Build inverted indices: shingle -> list of (file_path, shingle_set)
+    index_a = build_file_shingle_index(stud_a.student_files, ext_map_a, k)
+    index_b = build_file_shingle_index(stud_b.student_files, ext_map_b, k)
+
+    # Create fast lookup: path -> shingle_set
+    path_to_shingle_a = {}
+    for entries in index_a.values():
+        for path, shingle_set in entries:
+            path_to_shingle_a[path] = shingle_set
+    path_to_shingle_b = {}
+    for entries in index_b.values():
+        for path, shingle_set in entries:
+            path_to_shingle_b[path] = shingle_set
+
+    # Find candidate file pairs that share at least one shingle
+    common_shingles = set(index_a.keys()) & set(index_b.keys())
+    candidate_pairs = set()
+    for shingle in common_shingles:
+        for path_a, _ in index_a[shingle]:
+            for path_b, _ in index_b[shingle]:
+                if path_a != path_b:
+                    candidate_pairs.add((path_a, path_b))
+
+    # Compute similarity only for candidate pairs
+    for path_a, path_b in candidate_pairs:
+        ext = ext_map_a[path_a]
+        if ext != ext_map_b[path_b]:
+            continue
+        sim = jaccard(path_to_shingle_a[path_a], path_to_shingle_b[path_b])
+        all_file_sims.append(sim)
+        if sim >= cross_thresh:
+            flagged.append({
+                'pathA': path_a, 'pathB': path_b,
+                'similarity': sim,
+                'contentA': stud_a.student_files[path_a],
+                'contentB': stud_b.student_files[path_b],
+            })
 
     flagged.sort(key=lambda x: x['similarity'], reverse=True)
 
@@ -242,23 +316,21 @@ def compare_pair(stud_a: Student, stud_b: Student, file_thresh: float, cross_thr
         'studentA': stud_a.name,
         'studentB': stud_b.name,
         'overallSimilarity': overall,
-        'flaggedFiles': flagged[:20],
+        'flaggedFiles': flagged[:MAX_FLAGGED_FILES],
         'totalLinesA': stud_a.student_lines,
         'totalLinesB': stud_b.student_lines,
     }
-
 # ----------------------------------------------------------------------
 # Main Analysis (with progress callback)
 # ----------------------------------------------------------------------
 def run_analysis(template_path: Optional[Path], student_paths: List[Path],
                  allowed_exts: Set[str], term_list: List[str],
                  file_thresh: float, overall_thresh: float, cross_thresh: float,
-                 exclude_dirs: Set[str] = None, num_workers: int = None,
+                 exclude_dirs: Set[str], min_lines: int, shingle_size: int,
+                 num_workers: int = None,
                  progress_callback: Optional[Callable[[int, str], None]] = None) -> Tuple[List[Student], List[dict]]:
     if num_workers is None:
         num_workers = mp.cpu_count()
-    if exclude_dirs is None:
-        exclude_dirs = set()
 
     def report(percent, msg):
         if progress_callback:
@@ -269,8 +341,10 @@ def run_analysis(template_path: Optional[Path], student_paths: List[Path],
     print(f"Template hashes: {len(template_hashes)} unique files.")
 
     report(10, "Processing student ZIPs...")
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(process_student, p, allowed_exts, template_hashes, exclude_dirs) for p in student_paths]
+    # Use process pool for I/O‑bound tasks (but ZIP reading is mostly I/O, threads are fine)
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = [executor.submit(process_student, p, allowed_exts, template_hashes, exclude_dirs, min_lines)
+                   for p in student_paths]
         students = [f.result() for f in futures]
 
     report(30, "Counting terms...")
@@ -279,21 +353,35 @@ def run_analysis(template_path: Optional[Path], student_paths: List[Path],
 
     # Compare all pairs
     total_pairs = len(students)*(len(students)-1)//2
-    print(f"Comparing {total_pairs} pairs using {num_workers} threads...")
+    print(f"Comparing {total_pairs} pairs using {num_workers} processes...")
     report(40, f"Comparing {total_pairs} student pairs...")
 
     pairs = []
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = []
-        for i in range(len(students)):
-            for j in range(i+1, len(students)):
-                futures.append(executor.submit(compare_pair, students[i], students[j], file_thresh, cross_thresh))
+    # Prepare parameters for compare_pair
+    params = {
+        'file_thresh': file_thresh,
+        'cross_thresh': cross_thresh,
+        'shingle_size': shingle_size,
+    }
+    # Generate all pairs (i, j)
+    pair_list = [(students[i], students[j]) for i in range(len(students)) for j in range(i+1, len(students))]
+
+    # Use process pool with tqdm progress if available
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        # Use partial to fix params
+        compare_func = partial(compare_pair, params=params)
+        futures = [executor.submit(compare_func, pair) for pair in pair_list]
+
+        if HAS_TQDM:
+            iterator = tqdm(futures, total=len(pair_list), desc="Comparing pairs")
+        else:
+            iterator = futures
 
         completed = 0
-        for future in futures:
+        for future in iterator:
             pair = future.result()
             completed += 1
-            if total_pairs > 0:
+            if total_pairs > 0 and not HAS_TQDM:
                 prog = 40 + int(40 * completed / total_pairs)
                 report(prog, f"Comparing pairs: {completed}/{total_pairs} (found {len(pairs)} suspicious so far)")
             if pair['overallSimilarity'] >= overall_thresh:
@@ -306,10 +394,11 @@ def run_analysis(template_path: Optional[Path], student_paths: List[Path],
     return students, pairs
 
 # ----------------------------------------------------------------------
-# HTML Report Generation (with Consolas font size 9 for diff)
+# HTML Report Generation (with Consolas font)
 # ----------------------------------------------------------------------
 def generate_html_report(students: List[Student], pairs: List[dict],
-                         term_list: List[str], output_path: Path):
+                         term_list: List[str], output_path: Path,
+                         shingle_size: int, file_thresh: float, overall_thresh: float):
     html_diff = HtmlDiff(tabsize=4, wrapcolumn=80)
 
     def sim_color(sim):
@@ -323,7 +412,8 @@ def generate_html_report(students: List[Student], pairs: List[dict],
         else:
             return '#10b981'
 
-    diff_style = """
+    # CSS style block
+    style = """
         .diff-table, .diff-table td, .diff-table th, .diff-table pre, .diff-table code,
         .diff-container, .diff-content, .diff-header code {
             font-family: 'Cascadia Code', Consolas, 'Courier New', monospace !important;
@@ -406,38 +496,22 @@ def generate_html_report(students: List[Student], pairs: List[dict],
             color: #6b7280;
             font-style: italic;
         }
-    """
-    # ... (the rest of generate_html_report remains the same, just with the diff_style above)
-    # (We'll keep the same HTML structure as before, only the CSS changes)
-    html_content = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Plagiarism Checker Report</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        {diff_style}
-        .similarity-badge {{
+        .similarity-badge {
             padding: 0.25rem 0.75rem;
             border-radius: 9999px;
             color: white;
             font-weight: bold;
             display: inline-block;
             font-size: 0.875rem;
-        }}
-         .diff-table {{
-            font-family: 'Cascadia Code', Consolas, monospace;
-            font-size: 9pt;
-        }}
-        .card {{
+        }
+        .card {
             transition: all 0.2s;
-        }}
-        .card:hover {{
+        }
+        .card:hover {
             transform: translateY(-2px);
             box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
-        }}
-        button.diff-toggle {{
+        }
+        button.diff-toggle {
             background: #3b82f6;
             color: white;
             border: none;
@@ -446,36 +520,51 @@ def generate_html_report(students: List[Student], pairs: List[dict],
             font-size: 0.75rem;
             cursor: pointer;
             transition: background 0.2s;
-        }}
-        button.diff-toggle:hover {{
+        }
+        button.diff-toggle:hover {
             background: #2563eb;
-        }}
-        .file-header {{
+        }
+        .file-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
             flex-wrap: wrap;
             gap: 0.5rem;
-        }}
-        .file-badge-group {{
+        }
+        .file-badge-group {
             display: flex;
             align-items: center;
             gap: 0.5rem;
-        }}
+        }
+    """
+
+    # Build HTML using a template string
+    html_parts = []
+    html_parts.append(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Plagiarism Checker Report</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        {style}
     </style>
 </head>
 <body class="bg-gray-100">
     <div class="container mx-auto px-4 py-8 max-w-7xl">
         <h1 class="text-3xl font-bold text-gray-800 mb-2">Plagiarism Checker Report</h1>
-        <p class="text-gray-600 mb-8">Analysis of {len(students)} student submissions</p>
+        <p class="text-gray-600 mb-8">Analysis of {len(students)} student submissions (shingle size={shingle_size}, file threshold={file_thresh}, overall threshold={overall_thresh})</p>
+""")
 
-        <!-- Student Overview -->
+    # Student overview cards
+    html_parts.append("""
         <div class="bg-white rounded-lg shadow-md p-6 mb-8">
             <h2 class="text-xl font-semibold mb-4">Student Overview</h2>
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-"""
+""")
     for s in students:
-        html_content += f"""
+        html_parts.append(f"""
                 <div class="card bg-gray-50 p-4 rounded-lg border border-gray-200">
                     <div class="font-medium text-gray-800">{html.escape(s.name)}</div>
                     <div class="text-sm text-gray-600 mt-2">
@@ -484,51 +573,51 @@ def generate_html_report(students: List[Student], pairs: List[dict],
                         <div>Template: {s.template_pct:.1f}%</div>
                     </div>
                 </div>
-"""
-    html_content += """
+""")
+    html_parts.append("""
             </div>
         </div>
-"""
+""")
 
+    # Term occurrences
     if term_list:
-        html_content += """
-        <!-- Term Occurrences -->
+        html_parts.append("""
         <div class="bg-white rounded-lg shadow-md p-6 mb-8">
             <h2 class="text-xl font-semibold mb-4">Term Occurrences</h2>
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-"""
+""")
         for s in students:
-            html_content += f"""
+            html_parts.append(f"""
                 <div class="bg-gray-50 p-4 rounded-lg border border-gray-200">
                     <div class="font-medium text-gray-800">{html.escape(s.name)}</div>
                     <div class="mt-2 flex flex-wrap gap-2">
-"""
+""")
             for t in term_list:
-                html_content += f"""
+                html_parts.append(f"""
                         <span class="inline-flex items-center px-2 py-1 rounded-full text-xs bg-gray-200 text-gray-700">
                             {html.escape(t)}: <span class="font-bold ml-1">{s.term_counts[t]}</span>
                         </span>
-"""
-            html_content += """
+""")
+            html_parts.append("""
                     </div>
                 </div>
-"""
-        html_content += """
+""")
+        html_parts.append("""
             </div>
         </div>
-"""
+""")
 
+    # Suspicious pairs
     if pairs:
-        html_content += """
-        <!-- Pairwise Similarity -->
+        html_parts.append("""
         <div class="bg-white rounded-lg shadow-md p-6 mb-8">
             <h2 class="text-xl font-semibold mb-4">Suspicious Pairs</h2>
             <div class="space-y-4">
-"""
+""")
         for idx, pair in enumerate(pairs):
             sim_pct = pair['overallSimilarity'] * 100
             color = sim_color(pair['overallSimilarity'])
-            html_content += f"""
+            html_parts.append(f"""
                 <div class="border border-gray-200 rounded-lg overflow-hidden">
                     <div class="bg-gray-50 p-4 cursor-pointer" onclick="togglePair({idx})">
                         <div class="flex justify-between items-center">
@@ -545,7 +634,7 @@ def generate_html_report(students: List[Student], pairs: List[dict],
                         </div>
                     </div>
                     <div id="pair{idx}" style="display: none;" class="border-t border-gray-200 p-4 space-y-4">
-"""
+""")
             for fi, f in enumerate(pair['flaggedFiles']):
                 sim_pct = f['similarity'] * 100
                 color = sim_color(f['similarity'])
@@ -558,37 +647,36 @@ def generate_html_report(students: List[Student], pairs: List[dict],
                                                   context=False, numlines=3)
                 if not diff_table.strip():
                     diff_table = '<div class="diff-empty">No differences found (files are identical).</div>'
-                diff_html = f"""
-                <div class="diff-container">
-                    <div class="diff-header">
-                        <code>{html.escape(f['pathA'])} ↔ {html.escape(f['pathB'])}</code>
-                        <div class="file-badge-group">
-                            <span class="similarity-badge text-xs" style="background: {color};">{sim_pct:.0f}%</span>
-                            <button class="diff-toggle" onclick="toggleDiff('{diff_id}')">Show Diff</button>
+                html_parts.append(f"""
+                    <div class="diff-container">
+                        <div class="diff-header">
+                            <code>{html.escape(f['pathA'])} ↔ {html.escape(f['pathB'])}</code>
+                            <div class="file-badge-group">
+                                <span class="similarity-badge text-xs" style="background: {color};">{sim_pct:.0f}%</span>
+                                <button class="diff-toggle" onclick="toggleDiff('{diff_id}')">Show Diff</button>
+                            </div>
+                        </div>
+                        <div id="{diff_id}" class="diff-content" style="display: none;">
+                            {diff_table}
                         </div>
                     </div>
-                    <div id="{diff_id}" class="diff-content" style="display: none;">
-                        {diff_table}
+""")
+            html_parts.append("""
                     </div>
                 </div>
-                """
-                html_content += diff_html
-            html_content += """
-                    </div>
-                </div>
-"""
-        html_content += """
+""")
+        html_parts.append("""
             </div>
         </div>
-"""
+""")
     else:
-        html_content += """
+        html_parts.append("""
         <div class="bg-white rounded-lg shadow-md p-6 mb-8">
             <p class="text-gray-600">No pairs above the similarity threshold.</p>
         </div>
-"""
+""")
 
-    html_content += """
+    html_parts.append("""
     </div>
     <script>
         function togglePair(idx) {
@@ -613,9 +701,10 @@ def generate_html_report(students: List[Student], pairs: List[dict],
     </script>
 </body>
 </html>
-"""
+""")
+
     with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(html_content)
+        f.write(''.join(html_parts))
 
 # ----------------------------------------------------------------------
 # Command Line Interface
@@ -635,10 +724,19 @@ def main():
                         help=f'Allowed file extensions (default: {DEFAULT_ALLOWED_EXTS})')
     parser.add_argument('--terms', nargs='+', default=DEFAULT_TERMS,
                         help=f'Terms to count (default: {DEFAULT_TERMS})')
+    parser.add_argument('--shingle-size', type=int, default=DEFAULT_SHINGLE_SIZE,
+                        help=f'Token n‑gram size (default: {DEFAULT_SHINGLE_SIZE})')
+    parser.add_argument('--min-lines', type=int, default=MIN_FILE_LINES,
+                        help=f'Minimum lines in a file to be considered (default: {MIN_FILE_LINES})')
+    parser.add_argument('--exclude-dirs', nargs='+', default=list(EXCLUDED_DIRS),
+                        help=f'Directories to exclude (default: {EXCLUDED_DIRS})')
+    parser.add_argument('--workers', type=int, default=None,
+                        help='Number of worker processes (default: CPU count)')
     args = parser.parse_args()
 
     allowed_exts = set(args.exts)
     term_list = args.terms
+    exclude_dirs = set(args.exclude_dirs)
 
     students_list, pairs = run_analysis(
         template_path=args.template,
@@ -648,11 +746,14 @@ def main():
         file_thresh=args.file_thresh,
         overall_thresh=args.overall_thresh,
         cross_thresh=args.cross_thresh,
-        exclude_dirs=EXCLUDED_DIRS,
-        num_workers=None,
-        progress_callback=None
+        exclude_dirs=exclude_dirs,
+        min_lines=args.min_lines,
+        shingle_size=args.shingle_size,
+        num_workers=args.workers,
+        progress_callback=None  # CLI could use tqdm internally
     )
-    generate_html_report(students_list, pairs, term_list, args.output)
+    generate_html_report(students_list, pairs, term_list, args.output,
+                         args.shingle_size, args.file_thresh, args.overall_thresh)
     print(f"Report generated: {args.output}")
 
 if __name__ == '__main__':

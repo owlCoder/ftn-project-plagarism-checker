@@ -9,6 +9,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 
 logging.basicConfig(level=logging.INFO)
 
+# Import the improved analyzer
 from plagiarism_analyzer import generate_html_report, run_analysis, EXCLUDED_DIRS
 
 app = Flask(__name__)
@@ -31,11 +32,16 @@ def index():
 def analyze():
     template_file = request.files.get('template')
     student_files = request.files.getlist('students')
+    # ----- existing parameters -----
     exts = request.form.get('extensions', 'py,js,ts,java,cpp,c,cs,sql')
-    threshold = float(request.form.get('threshold', 0.4))
-    file_threshold = float(request.form.get('file_threshold', 0.6))
+    overall_thresh = float(request.form.get('overall_threshold', 0.4))   # renamed for clarity
+    file_thresh = float(request.form.get('file_threshold', 0.6))
     terms = request.form.get('terms', 'any,exception,todo')
     exclude_dirs = request.form.get('exclude_dirs', ','.join(EXCLUDED_DIRS))
+    # ----- new parameters -----
+    shingle_size = int(request.form.get('shingle_size', 5))
+    min_lines = int(request.form.get('min_lines', 10))
+    cross_thresh = float(request.form.get('cross_threshold', 0.7))
 
     if not student_files:
         return "At least one student file is required", 400
@@ -61,10 +67,13 @@ def analyze():
         'template_path': template_path,
         'student_paths': student_paths,
         'exts': set(exts.split(',')),
-        'threshold': threshold,
-        'file_threshold': file_threshold,
+        'overall_thresh': overall_thresh,
+        'file_thresh': file_thresh,
+        'cross_thresh': cross_thresh,
         'terms': [t.strip() for t in terms.split(',') if t.strip()],
         'exclude_dirs': set(exclude_dirs.split(',')),
+        'shingle_size': shingle_size,
+        'min_lines': min_lines,
     }
 
     progress_store[session_id] = {'status': 'processing', 'progress': 0, 'message': 'Starting...'}
@@ -80,10 +89,13 @@ def run_analysis_async(params):
     template_path = params['template_path']
     student_paths = params['student_paths']
     exts = params['exts']
-    threshold = params['threshold']
-    file_threshold = params['file_threshold']
+    overall_thresh = params['overall_thresh']
+    file_thresh = params['file_thresh']
+    cross_thresh = params['cross_thresh']
     terms = params['terms']
     exclude_dirs = params['exclude_dirs']
+    shingle_size = params['shingle_size']
+    min_lines = params['min_lines']
 
     def update_progress(percent, message):
         if session_id in progress_store:
@@ -97,18 +109,25 @@ def run_analysis_async(params):
             student_paths=student_paths,
             allowed_exts=exts,
             term_list=terms,
-            file_thresh=file_threshold,
-            overall_thresh=threshold,
-            cross_thresh=0.3,      # you can make this configurable via form
+            file_thresh=file_thresh,
+            overall_thresh=overall_thresh,
+            cross_thresh=cross_thresh,
             exclude_dirs=exclude_dirs,
-            num_workers=None,
+            min_lines=min_lines,
+            shingle_size=shingle_size,
+            num_workers=None,          # let the analyzer decide (CPU count)
             progress_callback=update_progress
         )
         update_progress(85, "Generating HTML report...")
         result_dir = Path(app.config['RESULT_FOLDER']) / session_id
         result_dir.mkdir(parents=True, exist_ok=True)
         report_path = result_dir / 'report.html'
-        generate_html_report(students, pairs, terms, report_path)
+        generate_html_report(
+            students, pairs, terms, report_path,
+            shingle_size=shingle_size,
+            file_thresh=file_thresh,
+            overall_thresh=overall_thresh
+        )
         results[session_id] = str(report_path)
         update_progress(100, "Done")
         progress_store[session_id]['status'] = 'done'
