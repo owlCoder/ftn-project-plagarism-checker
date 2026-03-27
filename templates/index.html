@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Plagiarism Checker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .dropzone {
+            border: 2px dashed #ccc;
+            border-radius: 1rem;
+            transition: all 0.2s;
+        }
+        .dropzone:hover {
+            border-color: #3b82f6;
+            background-color: #eff6ff;
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div class="container mx-auto px-4 py-12 max-w-3xl">
+        <div class="bg-white rounded-lg shadow-xl p-8">
+            <h1 class="text-3xl font-bold text-center text-gray-800 mb-2">Plagiarism Checker</h1>
+            <p class="text-center text-gray-600 mb-8">Upload template and student submissions (ZIP files)</p>
+
+            <form id="upload-form" enctype="multipart/form-data" class="space-y-6">
+                <!-- Template -->
+                <div>
+                    <label class="block text-gray-700 font-medium mb-2">Template ZIP</label>
+                    <div class="dropzone p-6 text-center cursor-pointer" id="template-dropzone">
+                        <input type="file" name="template" id="template" accept=".zip" class="hidden" required>
+                        <div class="text-gray-500">
+                            <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                            </svg>
+                            <p class="mt-2">Drag and drop or click to select</p>
+                            <p class="text-xs text-gray-400">ZIP file only</p>
+                        </div>
+                    </div>
+                    <p id="template-filename" class="text-sm text-gray-500 mt-1"></p>
+                </div>
+
+                <!-- Student ZIPs -->
+                <div>
+                    <label class="block text-gray-700 font-medium mb-2">Student ZIPs (multiple allowed)</label>
+                    <div class="dropzone p-6 text-center cursor-pointer" id="students-dropzone">
+                        <input type="file" name="students" id="students" multiple accept=".zip" class="hidden" required>
+                        <div class="text-gray-500">
+                            <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path>
+                            </svg>
+                            <p class="mt-2">Drag and drop or click to select</p>
+                            <p class="text-xs text-gray-400">ZIP files only</p>
+                        </div>
+                    </div>
+                    <p id="students-filename" class="text-sm text-gray-500 mt-1"></p>
+                </div>
+
+                <!-- Settings -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-gray-700 text-sm font-medium mb-1">File extensions (comma-separated)</label>
+                        <input type="text" name="extensions" value="py,js,ts,java,cpp,c,cs,sql" class="w-full border border-gray-300 rounded-lg p-2">
+                    </div>
+                    <div>
+                        <label class="block text-gray-700 text-sm font-medium mb-1">Overall similarity threshold (%)</label>
+                        <input type="number" name="threshold" step="0.01" min="0" max="1" value="0.4" class="w-full border border-gray-300 rounded-lg p-2">
+                    </div>
+                    <div>
+                        <label class="block text-gray-700 text-sm font-medium mb-1">Per‑file similarity threshold</label>
+                        <input type="number" name="file_threshold" step="0.05" min="0" max="1" value="0.6" class="w-full border border-gray-300 rounded-lg p-2">
+                    </div>
+                    <div>
+                        <label class="block text-gray-700 text-sm font-medium mb-1">Terms to check (comma-separated)</label>
+                        <input type="text" name="terms" value="any,exception,todo" class="w-full border border-gray-300 rounded-lg p-2">
+                    </div>
+                    <div class="md:col-span-2">
+                        <label class="block text-gray-700 text-sm font-medium mb-1">Excluded directories (comma-separated)</label>
+                        <input type="text" name="exclude_dirs" value="dist-electron,dist,public,__pycache__,node_modules,.git,build,target,venv,env,.idea" class="w-full border border-gray-300 rounded-lg p-2">
+                        <p class="text-xs text-gray-500 mt-1">Paths containing these will be ignored (case-insensitive).</p>
+                    </div>
+                </div>
+
+                <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition-colors">
+                    Run Analysis
+                </button>
+            </form>
+
+            <!-- Loading overlay -->
+            <div id="loading" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center hidden z-50">
+                <div class="bg-white rounded-lg p-8 text-center">
+                    <svg class="animate-spin h-10 w-10 text-blue-600 mx-auto mb-4" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <p class="text-gray-700">Analyzing submissions...</p>
+                    <p class="text-sm text-gray-500 mt-2">This may take a few minutes.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // File input handling
+        const templateInput = document.getElementById('template');
+        const templateDropzone = document.getElementById('template-dropzone');
+        const templateFilename = document.getElementById('template-filename');
+        const studentsInput = document.getElementById('students');
+        const studentsDropzone = document.getElementById('students-dropzone');
+        const studentsFilename = document.getElementById('students-filename');
+
+        function handleFileSelect(input, dropzone, filenameSpan, multiple = false) {
+            dropzone.addEventListener('click', () => input.click());
+            dropzone.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                dropzone.classList.add('border-blue-500', 'bg-blue-50');
+            });
+            dropzone.addEventListener('dragleave', () => {
+                dropzone.classList.remove('border-blue-500', 'bg-blue-50');
+            });
+            dropzone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                dropzone.classList.remove('border-blue-500', 'bg-blue-50');
+                const files = e.dataTransfer.files;
+                if (multiple) {
+                    input.files = files;
+                    updateFilenameSpan(input, filenameSpan);
+                } else {
+                    if (files.length) input.files = files;
+                    updateFilenameSpan(input, filenameSpan);
+                }
+            });
+            input.addEventListener('change', () => updateFilenameSpan(input, filenameSpan));
+        }
+
+        function updateFilenameSpan(input, span) {
+            if (input.files.length === 0) {
+                span.textContent = '';
+                return;
+            }
+            if (input.multiple) {
+                span.textContent = `${input.files.length} file(s) selected`;
+            } else {
+                span.textContent = input.files[0].name;
+            }
+        }
+
+        handleFileSelect(templateInput, templateDropzone, templateFilename, false);
+        handleFileSelect(studentsInput, studentsDropzone, studentsFilename, true);
+
+        // Form submission
+        const form = document.getElementById('upload-form');
+        const loadingDiv = document.getElementById('loading');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(form);
+            loadingDiv.classList.remove('hidden');
+
+            try {
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+                if (data.session_id) {
+                    // Poll for status
+                    pollStatus(data.session_id);
+                } else {
+                    alert('Error: ' + data.message);
+                    loadingDiv.classList.add('hidden');
+                }
+            } catch (err) {
+                alert('Network error: ' + err.message);
+                loadingDiv.classList.add('hidden');
+            }
+        });
+
+        function pollStatus(sessionId) {
+            const interval = setInterval(async () => {
+                const res = await fetch(`/status/${sessionId}`);
+                const data = await res.json();
+                if (data.status === 'done') {
+                    clearInterval(interval);
+                    window.location.href = data.report_url;
+                } else if (data.status === 'error') {
+                    clearInterval(interval);
+                    alert('Analysis failed: ' + data.message);
+                    loadingDiv.classList.add('hidden');
+                }
+            }, 2000);
+        }
+    </script>
+</body>
+</html>
