@@ -86,22 +86,23 @@
                 </button>
             </form>
 
-            <!-- Loading overlay -->
+            <!-- Loading overlay with progress bar -->
             <div id="loading" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center hidden z-50">
-                <div class="bg-white rounded-lg p-8 text-center">
-                    <svg class="animate-spin h-10 w-10 text-blue-600 mx-auto mb-4" fill="none" viewBox="0 0 24 24">
-                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    <p class="text-gray-700">Analyzing submissions...</p>
-                    <p class="text-sm text-gray-500 mt-2">This may take a few minutes.</p>
+                <div class="bg-white rounded-lg p-8 text-center w-96">
+                    <div class="mb-4">
+                        <div class="w-full bg-gray-200 rounded-full h-4 overflow-hidden">
+                            <div id="progress-bar" class="bg-blue-600 h-4 transition-all duration-300 ease-out" style="width: 0%"></div>
+                        </div>
+                        <p id="progress-message" class="text-gray-700 mt-3 text-sm">Analyzing submissions...</p>
+                    </div>
+                    <p class="text-xs text-gray-500">This may take a few minutes.</p>
                 </div>
             </div>
         </div>
     </div>
 
     <script>
-        // File input handling
+        // File input handling (unchanged)
         const templateInput = document.getElementById('template');
         const templateDropzone = document.getElementById('template-dropzone');
         const templateFilename = document.getElementById('template-filename');
@@ -148,14 +149,18 @@
         handleFileSelect(templateInput, templateDropzone, templateFilename, false);
         handleFileSelect(studentsInput, studentsDropzone, studentsFilename, true);
 
-        // Form submission
+        // Form submission with progress bar
         const form = document.getElementById('upload-form');
         const loadingDiv = document.getElementById('loading');
+        const progressBar = document.getElementById('progress-bar');
+        const progressMessage = document.getElementById('progress-message');
 
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
             const formData = new FormData(form);
             loadingDiv.classList.remove('hidden');
+            progressBar.style.width = '0%';
+            progressMessage.textContent = 'Starting analysis...';
 
             try {
                 const response = await fetch('/analyze', {
@@ -164,7 +169,6 @@
                 });
                 const data = await response.json();
                 if (data.session_id) {
-                    // Poll for status
                     pollStatus(data.session_id);
                 } else {
                     alert('Error: ' + data.message);
@@ -187,8 +191,12 @@
                     clearInterval(interval);
                     alert('Analysis failed: ' + data.message);
                     loadingDiv.classList.add('hidden');
+                } else if (data.status === 'processing') {
+                    // Update progress bar
+                    progressBar.style.width = data.progress + '%';
+                    progressMessage.textContent = data.message || 'Analyzing...';
                 }
-            }, 2000);
+            }, 1000); // poll every second
         }
     </script>
 </body>

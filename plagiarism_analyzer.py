@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Plagiarism Checker – Reliable Jaccard‑Based Detection
------------------------------------------------------
-- Uses the same simple tokenization and shingling as your original working script
-- Overall similarity = Jaccard on the union of all file shingles (global)
-- File‑level similarity = Jaccard on per‑file shingles
-- Cross‑path files considered if similarity >= cross_thresh (configurable)
-- Parallel processing, clean HTML report
+Plagiarism Checker – Reliable Jaccard‑Based Detection with Progress Callback
+----------------------------------------------------------------------------
+- Uses simple tokenization and shingling (proven algorithm)
+- Overall similarity = average of top 5 file similarities (same‑path + cross‑path)
+- Supports progress callback for real‑time UI updates
+- Diff font: Consolas, 9pt
 """
 
 import hashlib
@@ -14,12 +13,12 @@ import html
 import re
 import zipfile
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from difflib import HtmlDiff
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List, Set, Tuple, Optional, Callable
 import argparse
 import multiprocessing as mp
 import itertools
@@ -62,12 +61,10 @@ def normalize_content(content: str, ext: str) -> str:
     return content.lower()
 
 def tokenize_normalized(content: str, ext: str) -> List[str]:
-    """Split into alphanumeric tokens (identifiers, keywords, numbers)."""
     norm = normalize_content(content, ext)
     return re.findall(r'[a-z0-9_]+', norm)
 
 def shingles(tokens: List[str], k: int = DEFAULT_SHINGLE_SIZE) -> Set[str]:
-    """k‑shingle set: every consecutive k‑gram as a single string."""
     if len(tokens) < k:
         return {' '.join(tokens)}
     return {' '.join(tokens[i:i+k]) for i in range(len(tokens)-k+1)}
@@ -80,7 +77,6 @@ def jaccard(a: Set[str], b: Set[str]) -> float:
     return len(a & b) / len(a | b)
 
 def file_similarity(src_a: str, src_b: str, ext: str) -> float:
-    """Return Jaccard similarity of two source files, 0–1."""
     ta = shingles(tokenize_normalized(src_a, ext))
     tb = shingles(tokenize_normalized(src_b, ext))
     return jaccard(ta, tb)
@@ -160,7 +156,6 @@ def process_student(zip_path: Path, allowed_exts: Set[str], template_hashes: Set
     for path, content in all_files.items():
         ext = path.split('.')[-1].lower()
         if normalized_hash(content, ext) not in template_hashes:
-            # Skip very short files
             if content.count('\n') >= MIN_FILE_LINES:
                 student_files[path] = content
 
@@ -190,11 +185,11 @@ def check_terms(student: Student, term_list: List[str]) -> Dict[str, int]:
     return counts
 
 # ----------------------------------------------------------------------
-# Pair Comparison (using simple Jaccard)
+# Pair Comparison
 # ----------------------------------------------------------------------
 def compare_pair(stud_a: Student, stud_b: Student, file_thresh: float, cross_thresh: float) -> dict:
     flagged = []
-    all_file_sims = []  # collect all similarities for overall score
+    all_file_sims = []
 
     # Same‑path files
     common = set(stud_a.student_files.keys()) & set(stud_b.student_files.keys())
@@ -210,7 +205,7 @@ def compare_pair(stud_a: Student, stud_b: Student, file_thresh: float, cross_thr
                 'contentB': stud_b.student_files[path],
             })
 
-    # Cross‑path files (different names) – only if sim >= cross_thresh
+    # Cross‑path files
     cross = set()
     for pa, ca in stud_a.student_files.items():
         for pb, cb in stud_b.student_files.items():
@@ -236,7 +231,7 @@ def compare_pair(stud_a: Student, stud_b: Student, file_thresh: float, cross_thr
 
     flagged.sort(key=lambda x: x['similarity'], reverse=True)
 
-    # Overall similarity = average of top 5 file similarities (or all if fewer)
+    # Overall similarity = average of top 5 file similarities
     if all_file_sims:
         top = sorted(all_file_sims, reverse=True)[:5]
         overall = sum(top) / len(top)
@@ -253,51 +248,65 @@ def compare_pair(stud_a: Student, stud_b: Student, file_thresh: float, cross_thr
     }
 
 # ----------------------------------------------------------------------
-# Main Analysis (all‑pairs)
+# Main Analysis (with progress callback)
 # ----------------------------------------------------------------------
 def run_analysis(template_path: Optional[Path], student_paths: List[Path],
                  allowed_exts: Set[str], term_list: List[str],
                  file_thresh: float, overall_thresh: float, cross_thresh: float,
-                 exclude_dirs: Set[str] = None, num_workers: int = None) -> Tuple[List[Student], List[dict]]:
+                 exclude_dirs: Set[str] = None, num_workers: int = None,
+                 progress_callback: Optional[Callable[[int, str], None]] = None) -> Tuple[List[Student], List[dict]]:
     if num_workers is None:
         num_workers = mp.cpu_count()
     if exclude_dirs is None:
         exclude_dirs = set()
 
-    # 1. Template
+    def report(percent, msg):
+        if progress_callback:
+            progress_callback(percent, msg)
+
+    report(5, "Processing template...")
     template_hashes = process_template(template_path, allowed_exts, exclude_dirs)
     print(f"Template hashes: {len(template_hashes)} unique files.")
 
-    # 2. Process students (I/O heavy, use ThreadPool)
+    report(10, "Processing student ZIPs...")
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = [executor.submit(process_student, p, allowed_exts, template_hashes, exclude_dirs) for p in student_paths]
         students = [f.result() for f in futures]
 
-    # 3. Term counts
+    report(30, "Counting terms...")
     for s in students:
         s.term_counts = check_terms(s, term_list)
 
-    # 4. Compare all student pairs
-    pairs = []
+    # Compare all pairs
     total_pairs = len(students)*(len(students)-1)//2
     print(f"Comparing {total_pairs} pairs using {num_workers} threads...")
+    report(40, f"Comparing {total_pairs} student pairs...")
 
+    pairs = []
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = []
         for i in range(len(students)):
             for j in range(i+1, len(students)):
                 futures.append(executor.submit(compare_pair, students[i], students[j], file_thresh, cross_thresh))
+
+        completed = 0
         for future in futures:
             pair = future.result()
+            completed += 1
+            if total_pairs > 0:
+                prog = 40 + int(40 * completed / total_pairs)
+                report(prog, f"Comparing pairs: {completed}/{total_pairs} (found {len(pairs)} suspicious so far)")
             if pair['overallSimilarity'] >= overall_thresh:
                 pairs.append(pair)
 
+    report(80, "Sorting results...")
     pairs.sort(key=lambda x: x['overallSimilarity'], reverse=True)
     print(f"Kept {len(pairs)} pairs with overall similarity >= {overall_thresh:.2f}.")
+    report(90, "Preparing report...")
     return students, pairs
 
 # ----------------------------------------------------------------------
-# HTML Report Generation (same as before, using HtmlDiff)
+# HTML Report Generation (with Consolas font size 9 for diff)
 # ----------------------------------------------------------------------
 def generate_html_report(students: List[Student], pairs: List[dict],
                          term_list: List[str], output_path: Path):
@@ -315,6 +324,12 @@ def generate_html_report(students: List[Student], pairs: List[dict],
             return '#10b981'
 
     diff_style = """
+        .diff-table, .diff-table td, .diff-table th, .diff-table pre, .diff-table code,
+        .diff-container, .diff-content, .diff-header code {
+            font-family: 'Cascadia Code', Consolas, 'Courier New', monospace !important;
+            font-size: 9pt !important;
+            line-height: 1.3 !important;
+        }
         .diff-container {
             margin-top: 0.5rem;
             border: 1px solid #e5e7eb;
@@ -345,9 +360,6 @@ def generate_html_report(students: List[Student], pairs: List[dict],
         .diff-table {
             width: 100%;
             border-collapse: collapse;
-            font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', monospace;
-            font-size: 0.75rem;
-            line-height: 1.4;
         }
         .diff-table td {
             padding: 0.25rem 0.5rem;
@@ -395,7 +407,8 @@ def generate_html_report(students: List[Student], pairs: List[dict],
             font-style: italic;
         }
     """
-
+    # ... (the rest of generate_html_report remains the same, just with the diff_style above)
+    # (We'll keep the same HTML structure as before, only the CSS changes)
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -412,6 +425,10 @@ def generate_html_report(students: List[Student], pairs: List[dict],
             font-weight: bold;
             display: inline-block;
             font-size: 0.875rem;
+        }}
+         .diff-table {{
+            font-family: 'Cascadia Code', Consolas, monospace;
+            font-size: 9pt;
         }}
         .card {{
             transition: all 0.2s;
@@ -632,7 +649,8 @@ def main():
         overall_thresh=args.overall_thresh,
         cross_thresh=args.cross_thresh,
         exclude_dirs=EXCLUDED_DIRS,
-        num_workers=None
+        num_workers=None,
+        progress_callback=None
     )
     generate_html_report(students_list, pairs, term_list, args.output)
     print(f"Report generated: {args.output}")

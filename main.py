@@ -7,20 +7,18 @@ from flask import Flask, render_template, request, redirect, url_for, jsonify
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 
-# Import our plagiarism analysis functions (updated version with optional template)
 from plagiarism_analyzer import generate_html_report, run_analysis, EXCLUDED_DIRS
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-here'  # change in production
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB max upload
+app.config['SECRET_KEY'] = 'your-secret-key-here'
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
 app.config['UPLOAD_FOLDER'] = tempfile.mkdtemp()
 app.config['RESULT_FOLDER'] = tempfile.mkdtemp()
 
-# In-memory store for analysis results (session_id -> result html path or error)
 results = {}
+progress_store = {}
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() == 'zip'
@@ -31,8 +29,7 @@ def index():
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
-    # Get form data
-    template_file = request.files.get('template')   # may be None
+    template_file = request.files.get('template')
     student_files = request.files.getlist('students')
     exts = request.form.get('extensions', 'py,js,ts,java,cpp,c,cs,sql')
     threshold = float(request.form.get('threshold', 0.4))
@@ -43,17 +40,14 @@ def analyze():
     if not student_files:
         return "At least one student file is required", 400
 
-    # Save uploaded files to temporary location
     session_id = str(uuid.uuid4())
     upload_dir = Path(app.config['UPLOAD_FOLDER']) / session_id
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save template if provided
     template_path = None
     if template_file and template_file.filename:
         template_path = upload_dir / secure_filename(template_file.filename)
         template_file.save(template_path)
-        logging.info(f"Template saved: {template_path}")
 
     student_paths = []
     for f in student_files:
@@ -61,9 +55,7 @@ def analyze():
             path = upload_dir / secure_filename(f.filename)
             f.save(path)
             student_paths.append(path)
-            logging.info(f"Student file saved: {path}")
 
-    # Store settings for later use in background task
     analysis_params = {
         'session_id': session_id,
         'template_path': template_path,
@@ -75,7 +67,8 @@ def analyze():
         'exclude_dirs': set(exclude_dirs.split(',')),
     }
 
-    # Start analysis in background thread
+    progress_store[session_id] = {'status': 'processing', 'progress': 0, 'message': 'Starting...'}
+
     thread = threading.Thread(target=run_analysis_async, args=(analysis_params,))
     thread.daemon = True
     thread.start()
@@ -83,7 +76,6 @@ def analyze():
     return jsonify({'session_id': session_id, 'status': 'processing'})
 
 def run_analysis_async(params):
-    """Run the analysis and store the result HTML path."""
     session_id = params['session_id']
     template_path = params['template_path']
     student_paths = params['student_paths']
@@ -93,7 +85,13 @@ def run_analysis_async(params):
     terms = params['terms']
     exclude_dirs = params['exclude_dirs']
 
+    def update_progress(percent, message):
+        if session_id in progress_store:
+            progress_store[session_id]['progress'] = percent
+            progress_store[session_id]['message'] = message
+
     try:
+        update_progress(5, "Processing template...")
         students, pairs = run_analysis(
             template_path=template_path,
             student_paths=student_paths,
@@ -101,35 +99,53 @@ def run_analysis_async(params):
             term_list=terms,
             file_thresh=file_threshold,
             overall_thresh=threshold,
-            cross_thresh=0.3,
+            cross_thresh=0.3,      # you can make this configurable via form
             exclude_dirs=exclude_dirs,
-            num_workers=None
+            num_workers=None,
+            progress_callback=update_progress
         )
-        # Generate HTML report
+        update_progress(85, "Generating HTML report...")
         result_dir = Path(app.config['RESULT_FOLDER']) / session_id
         result_dir.mkdir(parents=True, exist_ok=True)
         report_path = result_dir / 'report.html'
         generate_html_report(students, pairs, terms, report_path)
         results[session_id] = str(report_path)
-        logging.info(f"Analysis completed for session {session_id}, report at {report_path}")
+        update_progress(100, "Done")
+        progress_store[session_id]['status'] = 'done'
+        logging.info(f"Analysis completed for session {session_id}")
     except Exception as e:
         logging.exception("Analysis failed")
         results[session_id] = f"ERROR: {str(e)}"
+        progress_store[session_id]['status'] = 'error'
+        progress_store[session_id]['message'] = f"Error: {str(e)}"
 
 @app.route('/status/<session_id>')
 def status(session_id):
-    """Poll for analysis completion."""
-    if session_id not in results:
-        return jsonify({'status': 'processing'})
-    result = results[session_id]
-    if result.startswith('ERROR'):
-        return jsonify({'status': 'error', 'message': result})
+    if session_id not in progress_store:
+        return jsonify({'status': 'processing', 'progress': 0, 'message': 'Initializing...'})
+    progress = progress_store[session_id]
+    if progress['status'] == 'done':
+        return jsonify({
+            'status': 'done',
+            'report_url': url_for('report', session_id=session_id),
+            'progress': 100,
+            'message': 'Complete'
+        })
+    elif progress['status'] == 'error':
+        return jsonify({
+            'status': 'error',
+            'message': progress.get('message', 'Unknown error'),
+            'progress': 0
+        })
     else:
-        return jsonify({'status': 'done', 'report_url': url_for('report', session_id=session_id)})
+        return jsonify({
+            'status': 'processing',
+            'progress': progress.get('progress', 0),
+            'message': progress.get('message', 'Processing...')
+        })
 
 @app.route('/report/<session_id>')
 def report(session_id):
-    """Display the generated report."""
     report_path = results.get(session_id)
     if not report_path or report_path.startswith('ERROR'):
         return "Report not found", 404
