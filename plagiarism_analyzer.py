@@ -555,7 +555,7 @@ def generate_html_report(students: List[Student], pairs: List[dict],
                 diff_table = html_diff.make_table(old_lines, new_lines,
                                                   fromdesc=f"{html.escape(pair['studentA'])} - {html.escape(f['pathA'])}",
                                                   todesc=f"{html.escape(pair['studentB'])} - {html.escape(f['pathB'])}",
-                                                  context=True, numlines=3)
+                                                  context=False, numlines=3)
                 if not diff_table.strip():
                     diff_table = '<div class="diff-empty">No differences found (files are identical).</div>'
                 diff_html = f"""
